@@ -1,0 +1,51 @@
+# Secrets and account-specific configuration
+.env
+.env.*
+!.env.example
+*.ini
+*.session
+*.session-journal
+*.key
+*.pem
+
+# Python and local tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime state, broker/Telegram data and generated research
+data/
+data_*/
+logs/
+output/
+reports/
+tmp/
+*.log
+*.err
+*.out
+*.jsonl
+*.csv
+*.csv.gz
+*.parquet
+*.pkl
+*.sqlite*
+
+# Generated and temporary files
+.tmp*
+tmp-*
+*.bak
+*.zip
+*.7z
+*.exe
+*.ico
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

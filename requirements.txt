@@ -1,0 +1,6 @@
+MetaTrader5
+pandas
+numpy
+openpyxl
+python-dotenv
+telethon
