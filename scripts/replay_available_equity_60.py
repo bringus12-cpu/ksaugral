@@ -28,6 +28,8 @@ def sized_lot(equity, loss_per_lot, minimum, step, maximum, risk_pct=1.75):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--rebuilt-events')
+    parser.add_argument('--market-machine-backtest')
+    parser.add_argument('--market-machine-analytics')
     parser.add_argument('--output', default='reports/available_equity_60sessions_r175_start1000_20260913.json')
     args = parser.parse_args()
     env = dotenv_values(ROOT / '.env.vantage')
@@ -51,6 +53,32 @@ def main():
                 for key in ('opened','closed'):
                     event[key] = datetime.fromisoformat(event[key])
                 events.append(event)
+        market_machine_pairs = []
+        if args.market_machine_backtest and args.market_machine_analytics:
+            machine = json.loads((ROOT/args.market_machine_backtest).read_text(encoding='utf-8-sig'))
+            analytics = json.loads((ROOT/args.market_machine_analytics).read_text(encoding='utf-8-sig'))
+            market_machine_pairs = list(analytics.get('stable_pairs', []))
+            selected_pairs = set(market_machine_pairs)
+            for row in machine.get('trades', []):
+                pair = f"{row['symbol']}::{row['strategy']}"
+                if pair not in selected_pairs:
+                    continue
+                original_volume = max(0.0000001, float(row.get('volume', 0.01) or 0.01))
+                events.append({
+                    'module': f"market_machine:{row['strategy']}",
+                    'message_id': 0,
+                    'target_index': 0,
+                    'fill_kind': 'market_machine',
+                    'status': str(row.get('reason', 'closed')),
+                    'symbol': str(row['symbol']),
+                    'side': str(row['side']),
+                    'entry': float(row['entry']),
+                    'sl': float(row['sl']),
+                    'loss_per_lot': abs(float(row['entry']) - float(row['sl'])) * 100.0,
+                    'pnl_per_lot': float(row['profit']) / original_volume,
+                    'opened': datetime.fromisoformat(str(row['entry_time']).replace('Z', '+00:00')),
+                    'closed': datetime.fromisoformat(str(row['exit_time']).replace('Z', '+00:00')),
+                })
         candidates = _candidate_events(json.loads((ROOT/'data_vantage/selected8_causal_70sessions_20260913.json').read_text()))
         exclusions = Counter()
         watched = set(env['TRADE_CHANNELS'].split(','))
@@ -176,7 +204,8 @@ def main():
                       modules={k:metrics(v) for k,v in groups.items()}, max_observed_equity_dd_pct=round(max_dd,2),
                       max_concurrent=max_concurrent, exclusions=dict(exclusions), quote_coverage=coverage,
                       active_quote_checks=total_marks, missing_active_quotes=missing_marks, incomplete_entry_marks=incomplete_entry_marks,
-                      source_events=len(events), rebuilt_source_coverage=rebuilt_coverage, forecast_eligible=False,
+                      source_events=len(events), rebuilt_source_coverage=rebuilt_coverage,
+                      market_machine_pairs=market_machine_pairs, forecast_eligible=False,
                       limitations=['Partial saved-event replay, NOT a fresh full strategy backtest.',
                                    'Dany/GHP regenerated when rebuilt_source_coverage is set; other base modules use previously accepted trades.',
                                    'Entry/SL/exit decisions reused from source simulations, not regenerated from live engine.',
