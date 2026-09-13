@@ -6,6 +6,9 @@ import os
 
 
 BOT_INDICATORS: tuple[dict[str, object], ...] = (
+    {"name": "DeMarker 14", "category": "Oscylator", "status": "candidate", "modules": ["Research"], "purpose": "Lokalna implementacja badawcza: powrot z ekstremum 0.3/0.7."},
+    {"name": "Vortex 14", "category": "Trend", "status": "candidate", "modules": ["Research"], "purpose": "Lokalna implementacja badawcza: przeciecie VI+ i VI-."},
+    {"name": "Chandelier Exit 22/3", "category": "Zarzadzanie pozycja", "status": "candidate", "modules": ["Research"], "purpose": "Lokalna implementacja badawcza: stop od ekstremum z buforem ATR."},
     {"name": "EMA 20/50/200", "category": "Trend", "status": "active", "modules": ["Autonomous", "Scalper", "Strategy Lab"], "purpose": "Kierunek trendu, pullback i filtr wyzszego interwalu."},
     {"name": "SMA 20/50", "category": "Trend", "status": "active", "modules": ["Strategy Lab"], "purpose": "Trend bazowy i odchylenie ceny od sredniej."},
     {"name": "WMA / DEMA / TEMA / HMA", "category": "Trend", "status": "active", "modules": ["Strategy Lab"], "purpose": "Szybsze srednie i przecięcia kierunkowe."},

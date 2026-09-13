@@ -33,11 +33,24 @@ DEFAULT_QUERIES = (
     "forex trading bot MetaTrader5 language:Python stars:>5 archived:false",
     "walk forward trading strategy language:Python stars:>5 archived:false",
     "quant trading indicators portfolio language:Python stars:>20 archived:false",
+    "gold XAUUSD strategy backtest archived:false",
+    "swing trading strategy language:Python stars:>5 archived:false",
 )
 
 # Remote code is never executed. Concepts are mapped to implementations that
 # already live in our reviewed strategy laboratory.
 CONCEPT_STRATEGIES: dict[str, tuple[str, ...]] = {
+    "fair value gap": ("liquidity_specialist",),
+    "fvg": ("liquidity_specialist",),
+    "order block": ("liquidity_specialist", "pullback_specialist"),
+    "liquidity sweep": ("liquidity_specialist",),
+    "market structure": ("liquidity_specialist", "breakout_specialist"),
+    "breakout retest": ("breakout_specialist", "pullback_specialist"),
+    "session breakout": ("breakout_specialist", "dual_thrust_specialist"),
+    "london session": ("breakout_specialist", "dual_thrust_specialist"),
+    "new york session": ("breakout_specialist", "dual_thrust_specialist"),
+    "xgboost": (),
+    "hidden markov": (),
     "bollinger": ("bollinger_rsi_specialist", "squeeze_release_specialist"),
     "breakout": ("breakout_specialist", "dual_thrust_specialist"),
     "cci": ("cci_reversal_specialist",),
@@ -105,6 +118,41 @@ class GitHubClient:
         return base64.b64decode(encoded).decode("utf-8", errors="replace")[:200_000]
 
 
+class GitLabClient:
+    def __init__(self, timeout_seconds: int = 20) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def _json(self, path: str):
+        request = Request("https://gitlab.com/api/v4" + path,
+                          headers={"User-Agent": "xao-graal-strategy-scout/1.0"})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            return json.loads(response.read(2_000_000).decode("utf-8"))
+
+    def search(self, query: str, per_page: int) -> list[dict[str, Any]]:
+        rows = self._json(f"/projects?search={quote(query)}&simple=true&visibility=public&per_page={per_page}")
+        return [{"full_name": "gitlab:" + row["path_with_namespace"],
+                 "html_url": row["web_url"], "description": row.get("description"),
+                 "stargazers_count": row.get("star_count", 0), "updated_at": row.get("last_activity_at"),
+                 "archived": row.get("archived", False), "license": None,
+                 "gitlab_id": row["id"], "provider": "gitlab"} for row in rows]
+
+    def readme(self, repo: dict[str, Any]) -> str:
+        detail = self._json(f"/projects/{repo['gitlab_id']}?license=true")
+        license_info = detail.get("license") or {}
+        repo["license"] = {"spdx_id": license_info.get("key", "")}
+        branch = detail.get("default_branch")
+        if not branch:
+            return ""
+        for name in ("README.md", "README.rst", "README"):
+            try:
+                payload = self._json(f"/projects/{repo['gitlab_id']}/repository/files/{quote(name, safe='')}?ref={quote(branch, safe='')}")
+                return base64.b64decode(payload.get("content", "")).decode("utf-8", errors="replace")[:200_000]
+            except HTTPError as exc:
+                if exc.code != 404:
+                    raise
+        return ""
+
+
 def extract_concepts(text: str) -> tuple[list[str], list[str]]:
     lowered = re.sub(r"\s+", " ", text.lower())
     concepts: list[str] = []
@@ -159,6 +207,7 @@ def scan_repositories(
     config: ScanConfig = ScanConfig(),
     queries: tuple[str, ...] = DEFAULT_QUERIES,
     cache_path: Path | None = None,
+    include_gitlab: bool = False,
 ) -> dict[str, Any]:
     client = GitHubClient(os.getenv("GITHUB_TOKEN", ""), config.timeout_seconds)
     found: dict[str, dict[str, Any]] = {}
@@ -173,6 +222,15 @@ def scan_repositories(
             errors.append(f"search {query!r}: {type(exc).__name__}: {exc}")
         time.sleep(0.3)
 
+    gitlab = GitLabClient(config.timeout_seconds)
+    if include_gitlab:
+        for query in ("trading bot", "backtest", "forex"):
+            try:
+                for repo in gitlab.search(query, config.per_query):
+                    found[repo["full_name"]] = repo
+            except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+                errors.append(f"gitlab search {query!r}: {type(exc).__name__}: {exc}")
+
     ranked_source = sorted(
         found.values(),
         key=lambda item: int(item.get("stargazers_count", 0) or 0),
@@ -182,7 +240,7 @@ def scan_repositories(
     for repo in ranked_source:
         full_name = str(repo.get("full_name", ""))
         try:
-            readme = client.readme(full_name)
+            readme = gitlab.readme(repo) if repo.get("provider") == "gitlab" else client.readme(full_name)
             repositories.append(score_repository(repo, readme))
         except (HTTPError, URLError, TimeoutError) as exc:
             errors.append(f"readme {full_name!r}: {type(exc).__name__}: {exc}")
@@ -209,6 +267,8 @@ def scan_repositories(
         "approved_for_concept_research": len(approved),
         "mapped_local_strategies": mapped,
         "security_policy": "metadata and README only; remote code is never executed",
+        "test_scope": "local concept implementations, not downloaded repository strategies",
+        "providers": ["github", "gitlab"] if include_gitlab else ["github"],
         "repositories": repositories,
         "errors": errors,
     }

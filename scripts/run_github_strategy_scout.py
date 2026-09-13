@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.github_strategy_scout import ScanConfig, markdown_report, scan_repositories
+from app.research_source_scout import research_source_report
 
 
 def _load(path: Path) -> dict:
@@ -47,6 +48,7 @@ def main() -> int:
     parser.add_argument("--per-query", type=int, default=8)
     parser.add_argument("--max-repositories", type=int, default=20)
     parser.add_argument("--skip-backtest", action="store_true")
+    parser.add_argument("--include-gitlab", action="store_true")
     args = parser.parse_args()
 
     data_dir = ROOT / "data_vantage"
@@ -55,7 +57,11 @@ def main() -> int:
     discovery = scan_repositories(
         ScanConfig(per_query=args.per_query, max_repositories=args.max_repositories),
         cache_path=cache_path,
+        include_gitlab=args.include_gitlab,
     )
+    source_report = research_source_report(per_query=min(args.per_query, 8))
+    source_report_path = data_dir / "research_source_scout_report.json"
+    source_report_path.write_text(json.dumps(source_report, indent=2, ensure_ascii=True), encoding="utf-8")
     strategies = list(discovery.get("mapped_local_strategies", []))
     errors: list[str] = []
     backtest_path = Path(args.backtest_output) if args.backtest_output else data_dir / "github_strategy_scout_backtest_60sessions.json"
@@ -116,14 +122,17 @@ def main() -> int:
             if code != 0:
                 errors.append(f"analytics exit {code}: {output}")
 
-    backtest = _load(backtest_path)
-    analytics = _load(analytics_path)
+    # Never present an earlier run as a fresh successful backtest.
+    usable = args.reuse_backtest or (not args.skip_backtest and bool(strategies) and not errors)
+    backtest = _load(backtest_path) if usable else {}
+    analytics = _load(analytics_path) if usable else {}
     stable_keys = set(analytics.get("stable_pairs", [])) | set(analytics.get("diversified_pairs", []))
     analytics_pairs = analytics.get("pairs", {})
     report = {
         "generated_utc": datetime.now(UTC).isoformat(),
         "mode": "discovery plus controlled local backtest",
         "discovery": discovery,
+        "external_sources": source_report,
         "backtest": {key: value for key, value in backtest.items() if key not in {"trades", "symbol_strategy_matrix"}},
         "analytics": {
             **{key: value for key, value in analytics.items() if key not in {"pairs", "top_absolute_correlations"}},
@@ -133,6 +142,7 @@ def main() -> int:
             "backtest": str(backtest_path.resolve()),
             "analytics": str(analytics_path.resolve()),
             "universe": str((ROOT / args.universe).resolve()) if args.universe else None,
+            "external_sources": str(source_report_path.resolve()),
         },
         "errors": errors,
     }

@@ -10,6 +10,14 @@ def test_extract_concepts_maps_only_to_local_strategies() -> None:
     assert "vwap_reclaim_specialist" in strategies
 
 
+def test_extract_gold_structure_concepts() -> None:
+    concepts, strategies = extract_concepts("FVG order block liquidity sweep and London session breakout")
+    assert "fair value gap" not in concepts
+    assert "fvg" in concepts
+    assert "liquidity_specialist" in strategies
+    assert "dual_thrust_specialist" in strategies
+
+
 def test_repository_without_known_license_is_not_safe() -> None:
     result = score_repository(
         {
