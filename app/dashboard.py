@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import load_settings
+from .indicator_catalog import indicator_catalog
 from .mt5_gateway import (
     Mt5Credentials,
     account_info,
@@ -357,6 +358,7 @@ HTML = """<!doctype html>
       <button class="tab" data-view="xauscalp">XAU Scalp</button>
       <button class="tab" data-view="contrscalp">Kontr Scalper</button>
       <button class="tab" data-view="agentteams">Agent Teams</button>
+      <button class="tab" data-view="indicators">Wskaźniki</button>
       <button class="tab" data-view="signals">Sygnały</button>
       <button class="tab" data-view="logs">Logi</button>
     </div>
@@ -613,6 +615,23 @@ HTML = """<!doctype html>
       </div>
     </section>
 
+    <section class="view" id="view-indicators">
+      <div class="grid cols-4" id="indicatorStats"></div>
+      <div class="panel" style="margin-top:12px;">
+        <div class="section-title">Katalog wskaźników <button id="reloadIndicators">Skanuj terminale MT5</button></div>
+        <div class="form-grid">
+          <div class="field"><label>Szukaj</label><input id="indicatorSearch" placeholder="np. MACD, trend, BBKELT"></div>
+          <div class="field"><label>Widok</label><select id="indicatorScope"><option value="bot">Używane i rozważane przez bota</option><option value="mt5">Znalezione w terminalach MT5</option></select></div>
+        </div>
+        <div class="notice" id="indicatorNotice" style="margin-top:10px;">Ładowanie katalogu...</div>
+        <div class="table-wrap" style="margin-top:10px;"><table id="indicatorTable"></table></div>
+      </div>
+      <div class="panel" style="margin-top:12px;">
+        <div class="section-title">Przeskanowane katalogi terminali</div>
+        <div class="table-wrap"><table id="indicatorTerminalTable"></table></div>
+      </div>
+    </section>
+
     <section class="view" id="view-signals">
       <div class="grid cols-2">
         <div class="panel">
@@ -641,7 +660,7 @@ HTML = """<!doctype html>
   </main>
 
   <script>
-    const state = { channels: [], channelLots: {}, configFields: [], configValues: {}, overview: null, refreshing: false };
+    const state = { channels: [], channelLots: {}, configFields: [], configValues: {}, overview: null, indicators: null, refreshing: false };
     const qs = (s) => document.querySelector(s);
     const qsa = (s) => Array.from(document.querySelectorAll(s));
     const esc = (v) => String(v ?? "-").replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
@@ -649,6 +668,40 @@ HTML = """<!doctype html>
 
     function table(headers, rows) {
       return `<tr>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr>` + rows.join("");
+    }
+
+    function renderIndicators() {
+      const data = state.indicators || {};
+      const bot = data.bot || {};
+      const mt5 = data.mt5 || {};
+      const scope = qs("#indicatorScope").value;
+      const query = qs("#indicatorSearch").value.trim().toLowerCase();
+      const stats = [
+        ["Aktywne w kodzie", bot.active_count || 0, "good"],
+        ["Opisane w katalogu", (bot.items || []).length, "blue"],
+        ["Pliki MT5", mt5.file_count || 0, "gold"],
+        ["Unikalne w MT5", mt5.unique_count || 0, "blue"],
+      ];
+      qs("#indicatorStats").innerHTML = stats.map(([label, value, cls]) => `<div class="panel stat"><div class="label">${esc(label)}</div><div class="value ${cls}">${esc(value)}</div></div>`).join("");
+      qs("#indicatorNotice").textContent = (data.notes || []).join(" ");
+      if (scope === "bot") {
+        const items = (bot.items || []).filter(item => JSON.stringify(item).toLowerCase().includes(query));
+        qs("#indicatorTable").innerHTML = table(["Wskaźnik", "Kategoria", "Status", "Moduły", "Zastosowanie"], items.map(item => row([
+          `<strong>${esc(item.name)}</strong>`, esc(item.category), `<span class="${item.status === 'active' ? 'good' : item.status === 'candidate' ? 'gold' : 'muted'}">${esc(item.status)}</span>`, esc((item.modules || []).join(", ") || "nieaktywny"), esc(item.purpose)
+        ])));
+      } else {
+        const items = (mt5.indicators || []).filter(item => JSON.stringify(item).toLowerCase().includes(query));
+        qs("#indicatorTable").innerHTML = table(["Nazwa", "Format", "Kopie", "Przykładowa lokalizacja"], items.map(item => row([
+          `<strong>${esc(item.name)}</strong>`, esc((item.formats || []).join(", ")), esc(item.copies), esc((item.locations || [])[0] || "-")
+        ])));
+      }
+      qs("#indicatorTerminalTable").innerHTML = table(["Katalog terminala", "Unikalne wskaźniki"], (mt5.terminals || []).map(item => row([esc(item.path), esc(item.indicator_count)])));
+    }
+
+    async function loadIndicators() {
+      qs("#indicatorNotice").textContent = "Skanowanie lokalnych terminali MT5...";
+      state.indicators = await api("/api/indicators");
+      renderIndicators();
     }
     function row(cells) {
       return `<tr>${cells.map(c => `<td>${c}</td>`).join("")}</tr>`;
@@ -1327,6 +1380,9 @@ HTML = """<!doctype html>
     qs("#reloadChannels").addEventListener("click", loadChannels);
     qs("#saveConfig").addEventListener("click", saveConfig);
     qs("#reloadConfig").addEventListener("click", loadConfig);
+    qs("#reloadIndicators").addEventListener("click", loadIndicators);
+    qs("#indicatorSearch").addEventListener("input", renderIndicators);
+    qs("#indicatorScope").addEventListener("change", renderIndicators);
     qs("#refreshNow").addEventListener("click", refresh);
     qs("#startBot").addEventListener("click", async () => {
       qs("#systemNotice").textContent = "Uruchamianie bota...";
@@ -1378,6 +1434,7 @@ HTML = """<!doctype html>
 
     loadChannels();
     loadConfig();
+    loadIndicators();
     refresh();
     setInterval(refresh, 1000);
     setInterval(() => {
@@ -1998,6 +2055,9 @@ def serve() -> None:
                         "lot_sizes": _parse_channel_lot_sizes(env_values.get("CHANNEL_LOT_SIZES", "{}")),
                     },
                 )
+                return
+            if parsed.path == "/api/indicators":
+                _send_json(self, HTTPStatus.OK, indicator_catalog())
                 return
             if parsed.path == "/api/agent-teams":
                 project_dir = load_settings().base_dir
