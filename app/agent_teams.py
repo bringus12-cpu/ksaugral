@@ -22,6 +22,7 @@ from .mt5_gateway import (
     get_rates_df,
     get_tick,
     mt5,
+    modify_position,
     positions_by_magic,
     send_market_order,
     shutdown,
@@ -1541,6 +1542,48 @@ def _dedicated_max_hold_seconds(team: TeamSpec) -> int:
     return _dedicated_strategy_parameters(strategy)[2] * 5 * 60
 
 
+def _dedicated_exit_policy(team: TeamSpec) -> dict:
+    """Return an explicitly configured R-based protection policy for one team."""
+    try:
+        configured = json.loads(os.getenv("AGENT_TEAM_EXIT_PROTECTION_JSON", "{}") or "{}")
+    except (TypeError, ValueError):
+        configured = {}
+    raw = configured.get(team.key, {}) if isinstance(configured, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    trigger_r = max(0.0, float(raw.get("trigger_r", 0.0) or 0.0))
+    if trigger_r <= 0.0:
+        return {}
+    return {
+        "trigger_r": trigger_r,
+        "lock_r": float(raw.get("lock_r", 0.0) or 0.0),
+        "trail_r": max(0.0, float(raw.get("trail_r", 0.0) or 0.0)),
+    }
+
+
+def _protected_stop(
+    side: str,
+    entry: float,
+    initial_sl: float,
+    current: float,
+    peak_r: float,
+    policy: dict,
+) -> tuple[float | None, float]:
+    distance = abs(entry - initial_sl)
+    if distance <= 0.0 or not policy:
+        return None, peak_r
+    favorable_r = (current - entry) / distance if side == "buy" else (entry - current) / distance
+    peak_r = max(peak_r, favorable_r)
+    if peak_r < float(policy["trigger_r"]):
+        return None, peak_r
+    stop_r = float(policy.get("lock_r", 0.0) or 0.0)
+    trail_r = float(policy.get("trail_r", 0.0) or 0.0)
+    if trail_r > 0.0:
+        stop_r = max(stop_r, peak_r - trail_r)
+    stop = entry + distance * stop_r if side == "buy" else entry - distance * stop_r
+    return stop, peak_r
+
+
 def _long_term_levels(
     symbol: str,
     side: str,
@@ -1734,6 +1777,22 @@ def _manage_shadow(
     price = float(tick.bid if side == "buy" else tick.ask)
     if price <= 0:
         return
+    policy = _dedicated_exit_policy(team)
+    protected_sl, peak_r = _protected_stop(
+        side,
+        float(item["entry"]),
+        float(item.get("initial_sl", item["sl"])),
+        price,
+        float(item.get("protect_peak_r", 0.0) or 0.0),
+        policy,
+    )
+    item["protect_peak_r"] = round(peak_r, 6)
+    if protected_sl is not None:
+        current_sl = float(item["sl"])
+        better = protected_sl > current_sl if side == "buy" else protected_sl < current_sl
+        if better:
+            item["sl"] = _round_price(team.symbol, protected_sl)
+            _append_jsonl(events_path, {"type": "shadow_protect", "team": team.key, "new_sl": item["sl"], "policy": policy})
     opened = pd.Timestamp(item.get("opened_utc", datetime.now(UTC).isoformat()))
     elapsed = max(0.0, (pd.Timestamp.now(tz="UTC") - opened).total_seconds())
     timed_out = int(item.get("max_hold_seconds", 0) or 0) > 0 and elapsed >= int(item["max_hold_seconds"])
@@ -1785,6 +1844,41 @@ def _manage_live(
         max_hold_seconds = int(item.get("max_hold_seconds", 0) or 0)
         opened = pd.Timestamp(item.get("opened_utc", datetime.now(UTC).isoformat()))
         elapsed = max(0.0, (pd.Timestamp.now(tz="UTC") - opened).total_seconds())
+        if position is not None:
+            side = str(item.get("side", "") or "")
+            entry = float(item.get("entry", getattr(position, "price_open", 0.0)) or 0.0)
+            initial_sl = float(item.get("initial_sl", 0.0) or 0.0)
+            if initial_sl <= 0.0:
+                initial_sl = float(getattr(position, "sl", 0.0) or 0.0)
+                item["initial_sl"] = initial_sl
+            current_price = float(getattr(position, "price_current", 0.0) or 0.0)
+            policy = _dedicated_exit_policy(team)
+            protected_sl, peak_r = _protected_stop(
+                side,
+                entry,
+                initial_sl,
+                current_price,
+                float(item.get("protect_peak_r", 0.0) or 0.0),
+                policy,
+            )
+            item["protect_peak_r"] = round(peak_r, 6)
+            if protected_sl is not None:
+                protected_sl = _round_price(team.symbol, protected_sl)
+                old_sl = float(getattr(position, "sl", 0.0) or 0.0)
+                better = protected_sl > old_sl if side == "buy" else old_sl <= 0.0 or protected_sl < old_sl
+                if better:
+                    result = modify_position(position, protected_sl, float(getattr(position, "tp", 0.0) or 0.0))
+                    _append_jsonl(
+                        events_path,
+                        {
+                            "type": "live_protect_attempt",
+                            "team": team.key,
+                            "ticket": ticket,
+                            "new_sl": protected_sl,
+                            "policy": policy,
+                            "retcode": int(getattr(result, "retcode", -1) or -1),
+                        },
+                    )
         if position is not None and max_hold_seconds > 0 and elapsed >= max_hold_seconds:
             last_request = pd.Timestamp(item.get("timeout_close_requested_utc", "1970-01-01T00:00:00+00:00"))
             if (pd.Timestamp.now(tz="UTC") - last_request).total_seconds() >= 30:
@@ -1854,6 +1948,7 @@ def _open_shadow(
         "side": decision["decision"],
         "entry": entry,
         "sl": sl,
+        "initial_sl": sl,
         "tp": tp,
         "volume": actual_volume,
         "sizing": dict(sizing or {}),
@@ -1925,6 +2020,7 @@ def _open_live(
             "team": team.key,
             "side": decision["decision"],
             "entry": entry,
+            "initial_sl": sl,
             "volume": actual_volume,
             "opened_utc": datetime.now(UTC).isoformat(),
             "max_hold_seconds": _dedicated_max_hold_seconds(team),

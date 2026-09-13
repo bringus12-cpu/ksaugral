@@ -30,6 +30,8 @@ def main():
     parser.add_argument('--rebuilt-events')
     parser.add_argument('--market-machine-backtest')
     parser.add_argument('--market-machine-analytics')
+    parser.add_argument('--start-balance', type=float, default=1000.0)
+    parser.add_argument('--risk-pct', type=float, default=1.75)
     parser.add_argument('--output', default='reports/available_equity_60sessions_r175_start1000_20260913.json')
     args = parser.parse_args()
     env = dotenv_values(ROOT / '.env.vantage')
@@ -122,7 +124,7 @@ def main():
             rates[symbol] = {int(b['time']): (float(b['open']), int(b['spread'])*info.point) for b in bars}
             specs[symbol] = dict(minimum=info.volume_min, step=info.volume_step, maximum=info.volume_max, contract=converted/delta)
             coverage[symbol] = dict(bars=len(bars), first=int(bars[0]['time']), last=int(bars[-1]['time']))
-        balance = peak = 1000.0
+        balance = peak = float(args.start_balance)
         max_dd = 0.0
         active = {}
         trades = []
@@ -181,7 +183,14 @@ def main():
                     exclusions['entry_missing_quote'] += 1
                     continue
                 spec = specs[e['symbol']]
-                lot = sized_lot(equity,e['loss_per_lot'],spec['minimum'],spec['step'],spec['maximum'])
+                lot = sized_lot(
+                    equity,
+                    e['loss_per_lot'],
+                    spec['minimum'],
+                    spec['step'],
+                    spec['maximum'],
+                    float(args.risk_pct),
+                )
                 if lot == 0:
                     exclusions['below_min_lot_or_nonpositive_equity'] += 1
                     continue
@@ -199,7 +208,7 @@ def main():
             return dict(legs=len(pnls), pnl=round(sum(pnls),2), win_rate=round(win/max(1,len(pnls))*100,2),
                         profit_factor=round(sum(max(0,p) for p in pnls)/losses,3) if losses else None)
         result = dict(start=start.isoformat(), end_exclusive=end.isoformat(), sessions=60, session_dates=[datetime.fromtimestamp(s,UTC).date().isoformat() for s in sessions],
-                      start_balance=1000, risk_pct_per_leg=1.75, sizing_basis='M1_open_marked_equity',
+                      start_balance=float(args.start_balance), risk_pct_per_leg=float(args.risk_pct), sizing_basis='M1_open_marked_equity',
                       final_balance=round(balance,2), total=metrics([t['pnl'] for t in trades]),
                       modules={k:metrics(v) for k,v in groups.items()}, max_observed_equity_dd_pct=round(max_dd,2),
                       max_concurrent=max_concurrent, exclusions=dict(exclusions), quote_coverage=coverage,

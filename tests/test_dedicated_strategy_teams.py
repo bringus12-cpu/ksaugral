@@ -5,6 +5,7 @@ from app.agent_teams import (
     _configured_dedicated_strategy_team_specs,
     _dedicated_strategy_levels,
     _dedicated_strategy_parameters,
+    _protected_stop,
 )
 
 
@@ -59,3 +60,19 @@ def test_configured_dedicated_pairs_are_validated(monkeypatch) -> None:
             "dedicated:mean_reversion",
         ),
     ]
+
+
+def test_protected_stop_locks_break_even_after_trigger() -> None:
+    stop, peak = _protected_stop(
+        "buy", 100.0, 90.0, 108.0, 0.0, {"trigger_r": 0.75, "lock_r": 0.0, "trail_r": 0.0}
+    )
+    assert peak == 0.8
+    assert stop == 100.0
+
+
+def test_protected_stop_trails_half_r_behind_peak() -> None:
+    stop, peak = _protected_stop(
+        "sell", 100.0, 110.0, 88.0, 0.0, {"trigger_r": 1.0, "lock_r": 0.0, "trail_r": 0.5}
+    )
+    assert peak == 1.2
+    assert stop == 93.0

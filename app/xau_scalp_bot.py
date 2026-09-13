@@ -1079,6 +1079,12 @@ def _protect_positions(symbol: str, cfg, meta: dict, events_path: Path) -> bool:
         if item.get("be_enabled") is False:
             continue
         trigger_dist = float(item.get("be_trigger_usd", getattr(cfg, "xau_scalp_be_trigger_usd", 0.0)) or 0.0)
+        risk_dist = abs(entry - float(item.get("sl", 0.0) or 0.0))
+        protect_trigger_r = max(0.0, _env_float("XAU_SCALP_PROTECT_TRIGGER_R", 0.0))
+        protect_lock_r = _env_float("XAU_SCALP_PROTECT_LOCK_R", 0.0)
+        protect_trail_r = max(0.0, _env_float("XAU_SCALP_PROTECT_TRAIL_R", 0.0))
+        if protect_trigger_r > 0.0 and risk_dist > 0.0:
+            trigger_dist = risk_dist * protect_trigger_r
         if trigger_dist <= 0.0:
             continue
         trigger_price = entry + trigger_dist if side == "buy" else entry - trigger_dist
@@ -1087,8 +1093,18 @@ def _protect_positions(symbol: str, cfg, meta: dict, events_path: Path) -> bool:
             continue
         trail_sl = _trailing_stop_candidate(side, entry, current, cfg)
         be_buffer = float(item.get("be_buffer_usd", cfg.xau_scalp_be_buffer_usd) or 0.0)
-        be_sl = entry + be_buffer if side == "buy" else entry - be_buffer
-        new_sl = trail_sl if trail_sl is not None else be_sl
+        if protect_trigger_r > 0.0 and risk_dist > 0.0:
+            favorable_r = (current - entry) / risk_dist if side == "buy" else (entry - current) / risk_dist
+            peak_r = max(float(item.get("protect_peak_r", 0.0) or 0.0), favorable_r)
+            item["protect_peak_r"] = round(peak_r, 6)
+            stop_r = protect_lock_r
+            if protect_trail_r > 0.0:
+                stop_r = max(stop_r, peak_r - protect_trail_r)
+            new_sl = entry + (risk_dist * stop_r) if side == "buy" else entry - (risk_dist * stop_r)
+            trail_sl = new_sl if protect_trail_r > 0.0 else None
+        else:
+            be_sl = entry + be_buffer if side == "buy" else entry - be_buffer
+            new_sl = trail_sl if trail_sl is not None else be_sl
         old_sl = float(getattr(position, "sl", 0.0) or 0.0)
         better = new_sl > old_sl if side == "buy" else old_sl <= 0 or new_sl < old_sl
         if not better:
