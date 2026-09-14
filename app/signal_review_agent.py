@@ -11,6 +11,7 @@ GHP_GOLD_CHAT_IDS = {-1002033681012, -1001958009741}
 GHP_INDEX_CHAT_ID = -1003306025363
 GHP_CURRENCY_CHAT_ID = -1003495213392
 PHOENIX_CHAT_ID = -1002864291293
+DANY_SIGNALS_CHAT_ID = -1004410781005
 
 GHP_CURRENCY_ALLOWLIST = {
     "audusd",
@@ -58,6 +59,8 @@ def source_family(chat_id: int | None, title: str = "") -> str:
         return "ghp_currency"
     if value == PHOENIX_CHAT_ID or "phoenix" in normalized:
         return "phoenix"
+    if value == DANY_SIGNALS_CHAT_ID or normalized.strip() == "dany signals":
+        return "dany_gold"
     return "other"
 
 
@@ -116,7 +119,7 @@ def review_signal(
 
     # Never chase an already completed GHP move at market. A return to the
     # provider level may still be traded as a time-limited pending order.
-    if family == "ghp_gold" and _past_tp1(side, market_price, clean_tps):
+    if family in {"ghp_gold", "dany_gold"} and _past_tp1(side, market_price, clean_tps):
         mode = "provider_pending"
         reasons.append("market_already_past_tp1_wait_for_retrace")
         score -= 25
@@ -126,7 +129,7 @@ def review_signal(
     if family.startswith("ghp") and (wait_for_execution or explicit_pending):
         mode = "provider_pending"
         reasons.append("preserve_provider_entry")
-    elif family == "ghp_gold" and market_price > 0.0:
+    elif family in {"ghp_gold", "dany_gold"} and market_price > 0.0:
         nearest = min(abs(float(entry) - market_price) for entry in clean_entries)
         if nearest > 2.0:
             mode = "provider_pending"
@@ -136,7 +139,7 @@ def review_signal(
     if family == "phoenix":
         mode = "phoenix_zone"
         reasons.append("three_leg_validated_profile")
-    elif family == "ghp_gold":
+    elif family in {"ghp_gold", "dany_gold"}:
         reasons.append("tp1_tp2_deep_original_sl")
     elif family == "ghp_currency":
         reasons.append("tp1_only_currency_profile")

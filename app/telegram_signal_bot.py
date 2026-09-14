@@ -1442,6 +1442,7 @@ def _normalize_gold_provider_quote_basis(signal: ParsedSignal, market_price: flo
         or signal.order_kind != "market"
         or _is_phoenix_source(signal.chat_id, signal.chat_title)
         or is_ghp_source(signal.chat_id, signal.chat_title)
+        or _is_dany_signals_source(signal.chat_id, signal.chat_title)
     ):
         return signal, 0.0
     entries = [float(value) for value in signal.entries if float(value or 0.0) > 0.0]
@@ -1790,6 +1791,22 @@ def _market_order_allowed_for_strategy(
     if float(strategy.strict_market_tolerance or 0.0) <= 0.0 and float(strategy.min_market_tp1_distance or 0.0) <= 0.0:
         return True
     return _strategy_market_entry_allowed(strategy, side, [float(planned_entry)], market_price, tps)
+
+
+def _review_execution_order_block_reason(review_execution_mode: str, order_kind: str) -> str | None:
+    if str(review_execution_mode or "").lower() == "provider_pending" and str(order_kind or "").lower() == "market":
+        return "review_provider_pending_market_block"
+    return None
+
+
+def _looks_like_complete_provider_signal_text(text: str) -> bool:
+    value = str(text or "")
+    return bool(
+        SIDE_RE.search(value)
+        and re.search(r"\b(?:entry|zone|focus)\b\s*[:=@-]?\s*\d", value, re.I)
+        and re.search(r"\b(?:sl|s/l|stop\s*loss)\b\s*[:=@-]?\s*\d", value, re.I)
+        and re.search(r"\b(?:tp\s*\d*|targets?|take\s*profit)\b\s*[:=@-]?\s*\d", value, re.I)
+    )
 
 
 def _market_tp1_reward_ok(side: str, market_price: float, sl: float, tp1: float, min_rr: float = MIN_MARKET_TP1_RR) -> bool:
@@ -3605,6 +3622,21 @@ def run() -> None:
                     return reconstructed
             return text
         if direct.kind not in {"commentary", "direction", "pre_signal"}:
+            return text
+        if _looks_like_complete_provider_signal_text(text):
+            _append_jsonl(
+                events_path,
+                {
+                    "type": "ghp_context_invalid_complete_signal_not_merged",
+                    "chat_id": int(chat_id or 0),
+                    "message_id": int(message_id or 0),
+                    "text": str(text or "")[:2000],
+                },
+            )
+            log.warning(
+                f"[GHP PARSER] complete-looking message={int(message_id or 0)} is invalid; "
+                "not merging it with an older signal"
+            )
             return text
         structural = re.compile(
             r"\b(?:entry|zone|focus|sl|s/l|stop\s*loss|tp\s*\d*|targets?|take\s*profit|buy|sell)\b",
@@ -7143,6 +7175,28 @@ def run() -> None:
                         float(signal.sl or sl),
                         max(0.1, _env_float("PHOENIX_TP1_RUNNER_SL_CAP_USD", 12.0)),
                     )
+
+                execution_block_reason = _review_execution_order_block_reason(
+                    review_execution_mode,
+                    order_kind,
+                )
+                if execution_block_reason:
+                    log.warning(
+                        f"[SKIP] review requires provider pending; blocked MARKET: "
+                        f"entry={entry_price:.2f} market={market_price:.2f} source={signal.chat_title}"
+                    )
+                    _append_jsonl(
+                        events_path,
+                        {
+                            "type": "skip",
+                            "reason": execution_block_reason,
+                            "entry_price": entry_price,
+                            "market_price": market_price,
+                            "review_execution_mode": review_execution_mode,
+                            "signal": base_variant_signal.as_dict(),
+                        },
+                    )
+                    continue
 
                 if order_kind in {"limit", "stop"}:
                     pending_reason = _invalid_pending_reason(signal.side, order_kind, entry_price, tick)

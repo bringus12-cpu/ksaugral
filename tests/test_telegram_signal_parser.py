@@ -17,6 +17,7 @@ from app.telegram_signal_bot import (
     _is_dany_signals_source,
     _is_phoenix_source,
     _is_secure_message,
+    _looks_like_complete_provider_signal_text,
     _market_near_entry_zone,
     _market_order_allowed_for_strategy,
     _minimum_safe_stop,
@@ -64,6 +65,7 @@ from app.telegram_signal_bot import (
     _repair_tps_for_entry,
     _repair_gold_hundred_digit_typo,
     _repair_phoenix_truncated_stop,
+    _review_execution_order_block_reason,
     _risk_usd_per_leg,
     _select_live_tps,
     _sl_increases_risk,
@@ -1934,6 +1936,38 @@ TAKE PROFITS
         normalized, shift = _normalize_gold_provider_quote_basis(signal, 4397.0)
         self.assertEqual(shift, 0.0)
         self.assertEqual(normalized, signal)
+
+    def test_dany_gold_relay_is_never_shifted_to_current_market(self):
+        signal = _parse_signal(
+            "Gold buy Entry 4316.5 SL 4301.5 TP 4327 TP 4337 TP 4347",
+            "-1004410781005:86",
+            -1004410781005,
+            "Dany Signals",
+            "",
+            86,
+        )
+        self.assertIsNotNone(signal)
+
+        normalized, shift = _normalize_gold_provider_quote_basis(signal, 4329.9)
+
+        self.assertEqual(shift, 0.0)
+        self.assertEqual(normalized, signal)
+
+    def test_provider_pending_review_can_never_emit_market_order(self):
+        self.assertEqual(
+            _review_execution_order_block_reason("provider_pending", "market"),
+            "review_provider_pending_market_block",
+        )
+        self.assertIsNone(_review_execution_order_block_reason("provider_pending", "limit"))
+        self.assertIsNone(_review_execution_order_block_reason("normal", "market"))
+
+    def test_complete_invalid_provider_signal_is_not_context_merge_candidate(self):
+        self.assertTrue(
+            _looks_like_complete_provider_signal_text(
+                "GOLD BUY ENTRY 4316.5 SL 4301.5 TP1 4327 TP2 4337"
+            )
+        )
+        self.assertFalse(_looks_like_complete_provider_signal_text("Changed entry to 4315"))
 
     def test_ghp_currency_defers_provider_be_before_tp1(self):
         managed = {"side": "sell", "tps": [184.72, 184.55], "protected_to_tp1": False}

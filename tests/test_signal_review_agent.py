@@ -55,6 +55,22 @@ def test_ghp_signal_after_tp1_waits_at_provider_entry_instead_of_chasing():
     assert "market_already_past_tp1_wait_for_retrace" in result.reasons
 
 
+def test_dany_gold_relay_after_tp1_waits_at_provider_entry() -> None:
+    result = _review(
+        chat_id=-1004410781005,
+        chat_title="Dany Signals",
+        side="buy",
+        entries=[4316.5],
+        sl=4301.5,
+        tps=[4327.0, 4337.0, 4347.0],
+        market_price=4330.0,
+        raw_text="Gold buy entry 4316.5 SL 4301.5 TP 4327 TP 4337 TP 4347",
+    )
+    assert result.source_family == "dany_gold"
+    assert result.execution_mode == "provider_pending"
+    assert "market_already_past_tp1_wait_for_retrace" in result.reasons
+
+
 def test_rejects_mixed_buy_and_sell_context():
     result = _review(raw_text="SELL 4436 SL 4456 TP 4396 fight with me BUY 4410")
     assert result.decision == "reject"
