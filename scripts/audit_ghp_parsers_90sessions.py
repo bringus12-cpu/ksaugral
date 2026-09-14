@@ -7,7 +7,7 @@ import math
 import os
 import sys
 from collections import Counter, defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import median
@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 from app.config import load_settings
 from app.ghp_parser import GHP_CHAT_IDS, GhpMessage, parse_ghp_message
 from app.mt5_gateway import Mt5Credentials, connect, ensure_symbol, mt5, shutdown
+from app.provider_update_agent import pending_cancel_candidate, review_provider_pending_update
 
 
 PUBLIC_USERNAME = "ghptrading"
@@ -108,6 +109,18 @@ def _deduplicate(rows: list[dict[str, Any]], minutes: int = 20) -> tuple[list[di
     return kept, duplicates
 
 
+def _parse_provider_message(text: str, title: str, cancel_agent_enabled: bool) -> GhpMessage:
+    parsed = parse_ghp_message(text, title)
+    if (
+        cancel_agent_enabled
+        and parsed.signal is None
+        and parsed.kind == "commentary"
+        and pending_cancel_candidate(text)
+    ):
+        return replace(parsed, kind="cancel")
+    return parsed
+
+
 def _attach_actions(rows: list[dict[str, Any]]) -> None:
     signals_by_message: dict[tuple[int, int], dict[str, Any]] = {}
     latest_by_chat_asset: dict[tuple[int, str], dict[str, Any]] = {}
@@ -140,6 +153,7 @@ def _attach_actions(rows: list[dict[str, Any]]) -> None:
                     "move_to_be": parsed.get("move_to_be", False),
                     "message_id": row["message_id"],
                     "reply_routed": bool(row["reply_to"]),
+                    "text": row.get("text", ""),
                 }
             )
 
@@ -151,6 +165,7 @@ def _simulate(
     target_index: int,
     expiry_minutes: int,
     be_after_tp1: bool,
+    cancel_agent_enabled: bool = True,
 ) -> dict[str, Any]:
     signal = row["parsed"]["signal"]
     side = signal["side"]
@@ -196,7 +211,20 @@ def _simulate(
             action = actions[action_idx]
             action_idx += 1
             if action["kind"] == "cancel" and idx <= trigger_idx:
-                return {"status": "cancelled", "r": 0.0, "pnl_001": 0.0, "entry": entry, "sl": sl}
+                if not cancel_agent_enabled:
+                    return {"status": "cancelled", "r": 0.0, "pnl_001": 0.0, "entry": entry, "sl": sl}
+                cancel_review = review_provider_pending_update(
+                    text=str(action.get("text", "") or ""),
+                    scoped=True,
+                    side=side,
+                    asset=str(signal.get("asset", "") or ""),
+                    entry=entry,
+                    tp1=float(tps[0]),
+                    current_price=float(bar.open),
+                    created_utc=row["date_dt"].isoformat(),
+                )
+                if cancel_review.decision == "cancel":
+                    return {"status": "cancelled", "r": 0.0, "pnl_001": 0.0, "entry": entry, "sl": sl}
             if action["kind"] == "breakeven":
                 current_sl = entry
             elif action["kind"] == "close_partial" and fraction > 0.0:
@@ -242,7 +270,11 @@ def _simulate(
     return {"status": "timeout", "r": realized_r, "pnl_001": realized_pnl, "entry": entry, "sl": sl, "opened": opened_at, "closed": frame.iloc[max(trigger_idx, end_idx - 1)].time.to_pydatetime()}
 
 
-async def _messages(client: TelegramClient, start: datetime) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+async def _messages(
+    client: TelegramClient,
+    start: datetime,
+    cancel_agent_enabled: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     channels: dict[str, Any] = {}
     async for dialog in client.iter_dialogs():
@@ -257,7 +289,7 @@ async def _messages(client: TelegramClient, start: datetime) -> tuple[list[dict[
             text = str(getattr(message, "raw_text", "") or "")
             if not text:
                 continue
-            parsed = parse_ghp_message(text, str(dialog.title or ""))
+            parsed = _parse_provider_message(text, str(dialog.title or ""), cancel_agent_enabled)
             row = {
                 "channel": channel_key,
                 "chat_id": int(dialog.id),
@@ -283,6 +315,7 @@ async def main() -> None:
     parser.add_argument("--sessions", type=int, default=90)
     parser.add_argument("--output", default="data_vantage/ghp_parser_audit_90sessions_20260904.json")
     parser.add_argument("--messages-input", default="")
+    parser.add_argument("--legacy-cancel", action="store_true")
     args = parser.parse_args()
     for env_file in args.env:
         load_dotenv(env_file, override=True)
@@ -303,7 +336,9 @@ async def main() -> None:
                 for line in handle:
                     row = json.loads(line)
                     row["date_dt"] = datetime.fromisoformat(str(row["date"]).replace("Z", "+00:00"))
-                    row["parsed"] = asdict(parse_ghp_message(row["text"], row["title"]))
+                    row["parsed"] = asdict(
+                        _parse_provider_message(row["text"], row["title"], not args.legacy_cancel)
+                    )
                     row.pop("actions", None)
                     if not (start <= row["date_dt"] <= end):
                         continue
@@ -324,7 +359,7 @@ async def main() -> None:
             try:
                 if not await client.is_user_authorized():
                     raise RuntimeError("Telegram audit session is not authorized")
-                rows, channels = await _messages(client, start)
+                rows, channels = await _messages(client, start, not args.legacy_cancel)
             finally:
                 await client.disconnect()
 
@@ -353,7 +388,15 @@ async def main() -> None:
                 frame = rates.get(asset)
                 if not symbol or frame is None or frame.empty:
                     continue
-                outcome = _simulate(row, frame, symbol, target_index, expiry, be_after_tp1)
+                outcome = _simulate(
+                    row,
+                    frame,
+                    symbol,
+                    target_index,
+                    expiry,
+                    be_after_tp1,
+                    cancel_agent_enabled=not args.legacy_cancel,
+                )
                 outcomes.append({"channel": row["channel"], "asset": asset, **outcome})
             decided = [row for row in outcomes if row["status"] not in {"expired", "cancelled", "invalid", "no_rates"}]
             winners = [row for row in decided if row["r"] > 0.0]
@@ -411,6 +454,7 @@ async def main() -> None:
             "parsed_signals_before_cross_channel_dedup": len(signal_rows),
             "unique_signals": len(unique_signals),
             "cross_channel_duplicates": duplicate_count,
+            "cancel_agent_enabled": not args.legacy_cancel,
             "message_kind_counts": dict(Counter(row["parsed"]["kind"] for row in rows)),
             "assets": {asset: {"symbol": symbols.get(asset), "m1_bars": len(rates.get(asset, []))} for asset in assets},
             "configurations": results,
