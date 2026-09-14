@@ -40,6 +40,7 @@ from .mt5_gateway import (
     mt5,
 )
 from .risk import current_spread_points, normalize_volume
+from .provider_update_agent import pending_cancel_candidate, review_provider_pending_update
 from .signal_review_agent import load_review_policy, review_signal, source_family
 
 
@@ -2754,10 +2755,7 @@ def _signal_global_content_signature_values(
 
 
 def _is_cancel_message(text: str) -> bool:
-    normalized = _normalize_text(text)
-    if not normalized:
-        return False
-    return bool(CANCEL_RE.search(normalized))
+    return pending_cancel_candidate(_normalize_text(text))
 
 
 def _is_hold_message(text: str) -> bool:
@@ -7711,6 +7709,47 @@ def run() -> None:
                 signal_id, managed = managed_match
                 if bool(managed.get("ignore_channel_pending_cancel", False)):
                     continue
+                current_price = 0.0
+                try:
+                    tick = get_tick(managed_symbol)
+                    managed_side = str(managed.get("side", "") or "").lower()
+                    current_price = float(tick.ask if managed_side == "buy" else tick.bid)
+                except Exception as exc:
+                    log.warning(
+                        f"[CANCEL-AGENT] market context unavailable for {signal_id}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                cancel_review = review_provider_pending_update(
+                    text=text,
+                    scoped=True,
+                    side=str(managed.get("side", "") or "").lower(),
+                    asset=str(managed.get("asset", "") or "").lower(),
+                    entry=float(managed.get("entry", 0.0) or 0.0),
+                    tp1=float(managed.get("tp1", 0.0) or 0.0),
+                    current_price=current_price,
+                    created_utc=str(managed.get("created_utc", "") or ""),
+                )
+                _append_jsonl(
+                    events_path,
+                    {
+                        "type": "provider_pending_update_agent",
+                        "signal_id": signal_id,
+                        "order_ticket": ticket,
+                        "symbol": managed_symbol,
+                        "chat_id": chat_id,
+                        "chat_title": chat_title,
+                        "message_id": message_id,
+                        "current_price": current_price,
+                        "review": cancel_review.as_dict(),
+                        "text": text,
+                    },
+                )
+                if cancel_review.decision != "cancel":
+                    log.warning(
+                        f"[CANCEL-AGENT] kept pending {ticket} for {signal_id}: "
+                        f"decision={cancel_review.decision} reasons={','.join(cancel_review.reasons)}"
+                    )
+                    continue
                 result = remove_order(order, magic=cfg.magic)
                 retcode = getattr(result, "retcode", None)
                 _append_jsonl(
@@ -7725,6 +7764,7 @@ def run() -> None:
                         "message_id": message_id,
                         "retcode": retcode,
                         "cancel_text": text,
+                        "cancel_review": cancel_review.as_dict(),
                         "managed": managed,
                     },
                 )
