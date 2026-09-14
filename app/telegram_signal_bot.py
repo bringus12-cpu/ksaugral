@@ -4311,6 +4311,7 @@ def run() -> None:
         ghp_signature = _ghp_family_content_signature(signal)
         ghp_trade_signature = _ghp_family_trade_signature(signal)
         relay_signature = _relay_content_signature(signal)
+        allow_cross_channel_duplicates = _env_bool("SIGNAL_ALLOW_CROSS_CHANNEL_DUPLICATES", False)
         allow_dany_source_duplicates = _env_bool("DANY_ALLOW_SOURCE_DUPLICATES", False)
         dany_source = _is_dany_signals_source(signal.chat_id, signal.chat_title)
         recent = _prune_recent_signatures()
@@ -4333,6 +4334,11 @@ def run() -> None:
         )
         if seen_within(signature, _env_float("SIGNAL_DUPLICATE_WINDOW_MINUTES", 30.0)):
             return True
+        # The same setup may be an independent recommendation when it comes
+        # from another Telegram group. Same-chat repeats remain blocked by
+        # the channel-scoped signature above.
+        if allow_cross_channel_duplicates:
+            return False
         if allow_dany_source_duplicates and dany_source:
             return False
         return seen_within(
